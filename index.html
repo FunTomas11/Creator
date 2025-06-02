@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Navigable Grid</title>
+	<style>
+		body {
+			margin: 0;
+			overflow: hidden;
+			background-color: #f0f0f0;
+		}
+
+		canvas {
+			display: block;
+		}
+	</style>
+</head>
+
+<body>
+	<input type="file" id="imageUpload" accept="image/*" style="position: absolute; top: 10px; left: 10px; z-index: 10;">
+	<button id="addExampleButtonBtn" style="position: absolute; top: 10px; left: 120px; z-index: 10;">Add Button</button>
+	<button id="addClosedQuestionBtn" style="position: absolute; top: 10px; left: 220px; z-index: 10;">Add Closed
+		Q</button>
+	<button id="addMatchPairsBtn" style="position: absolute; top: 10px; left: 330px; z-index: 10;">Add Match
+		Pairs</button>
+	<button id="addVoiceRecordingBtn" style="position: absolute; top: 10px; left: 470px; z-index: 10;">Add Voice
+		Rec</button>
+	<canvas id="gridCanvas"></canvas>
+
+	<script>
+		const canvas = document.getElementById('gridCanvas');
+		const ctx = canvas.getContext('2d');
+
+		let elements = []; // To store all elements like images, text, etc.
+		let selectedElement = null;
+		let isMovingElement = false;
+		let isResizingElement = false;
+		let elementDragOffsetX = 0; // For element dragging, relative to element's top-left in world coords
+		let elementDragOffsetY = 0;
+
+
+		let isDragging = false;
+		let dragStartX, dragStartY;
+		let offsetX = 0;
+		let offsetY = 0;
+		let scale = 1.0;
+		const zoomSensitivity = 0.1;
+		const minScale = 0.1;
+		const maxScale = 5.0;
+		const gridSize = 25; // Adjusted grid size for finer control
+
+		let activeInputElement = null;
+		let editingContext = null; // { element, fieldPath, worldRect, font, textAlign, originalText }
+		// let showGrid = false; // Replaced by gridOpacity logic
+
+		const RESIZE_HANDLE_SCREEN_SIZE = 10; // Size of the handle in screen pixels
+		const MIN_ELEMENT_SIZE_SCREEN = 20;   // Minimum element size in screen pixels
+
+		// Constants for grid animation
+		const GRID_HIDE_DEBOUNCE_TIME = 750; // ms
+		const GRID_FADE_DURATION = 250;    // ms
+
+		// State for grid animation
+		let gridOpacity = 0;
+		let targetGridOpacity = 0;
+		let gridAnimationId = null;
+		let gridHideTimer = null;
+		let lastFrameTime = 0;
+
+		function resizeCanvas() {
+			canvas.width = window.innerWidth;
+			canvas.height = window.innerHeight;
+			redrawCanvas();
+		}
+
+		// Helper function to snap a value to the grid
+		function snapToGrid(value, gs = gridSize) {
+			return Math.round(value / gs) * gs;
+		}
+
+		// Helper to convert screen coordinates to world coordinates
+		function screenToWorld(screenX, screenY) {
+			return {
+				x: (screenX - offsetX) / scale,
+				y: (screenY - offsetY) / scale
+			};
+		}
+
+		// Helper to check if a point is inside an element's bounds
+		function isPointInElement(worldX, worldY, element) {
+			if (!element) return false;
+			// Works for any rectangular element with x, y, width, height
+			if (element.type === 'image' || element.type === 'button' || element.type === 'closedQuestion' || element.type === 'matchPairs' || element.type === 'voiceRecording') {
+				return worldX >= element.x && worldX <= element.x + element.width &&
+					worldY >= element.y && worldY <= element.y + element.height;
+			}
+			return false;
+		}
+
+		// --- Grid Animation Functions ---
+		function setTargetGridOpacity(target, immediate = false) {
+			if (target === 1) { // Showing grid
+				clearTimeout(gridHideTimer);
+				gridHideTimer = null;
+			}
+			targetGridOpacity = target;
+
+			if (immediate) {
+				gridOpacity = targetGridOpacity;
+				if (gridAnimationId) {
+					cancelAnimationFrame(gridAnimationId);
+					gridAnimationId = null;
+				}
+				redrawCanvas(); // Ensure immediate visual update
+			} else if (Math.abs(gridOpacity - targetGridOpacity) > 0.001 && !gridAnimationId) {
+				lastFrameTime = performance.now();
+				gridAnimationId = requestAnimationFrame(animateGrid);
+			}
+		}
+
+		function animateGrid(currentTime) {
+			const deltaTime = currentTime - lastFrameTime;
+			lastFrameTime = currentTime;
+
+			const opacityChangePerMs = 1 / GRID_FADE_DURATION;
+			const opacityDelta = opacityChangePerMs * deltaTime;
+
+			if (gridOpacity < targetGridOpacity) {
+				gridOpacity = Math.min(targetGridOpacity, gridOpacity + opacityDelta);
+			} else if (gridOpacity > targetGridOpacity) {
+				gridOpacity = Math.max(targetGridOpacity, gridOpacity - opacityDelta);
+			}
+
+			redrawCanvas();
+
+			if (Math.abs(gridOpacity - targetGridOpacity) > 0.001) {
+				gridAnimationId = requestAnimationFrame(animateGrid);
+			} else {
+				gridOpacity = targetGridOpacity; // Ensure it's exactly the target
+				cancelAnimationFrame(gridAnimationId);
+				gridAnimationId = null;
+			}
+		}
+
+		function drawGridLines() {
+			if (gridOpacity <= 0.001) return; // Don't draw if fully transparent
+
+			const currentGridSize = gridSize; // Drawing grid lines based on base grid size in world coordinates
+
+			const { x: worldViewX1, y: worldViewY1 } = screenToWorld(0, 0);
+			const { x: worldViewX2, y: worldViewY2 } = screenToWorld(canvas.width, canvas.height);
+
+			const startX = Math.floor(worldViewX1 / currentGridSize) * currentGridSize;
+			const startY = Math.floor(worldViewY1 / currentGridSize) * currentGridSize;
+			// For loop conditions, we want to go up to or slightly past the far edge
+			const endX = Math.ceil(worldViewX2 / currentGridSize) * currentGridSize;
+			const endY = Math.ceil(worldViewY2 / currentGridSize) * currentGridSize;
+
+			ctx.globalAlpha = gridOpacity; // Apply fade effect
+			ctx.beginPath();
+			ctx.strokeStyle = '#ccc';
+			ctx.lineWidth = 1 / scale; // Adjust line width with zoom
+
+			// Draw vertical lines
+			for (let x = startX; x < endX; x += currentGridSize) {
+				ctx.moveTo(x, worldViewY1 - currentGridSize); // Extend lines slightly beyond viewport
+				ctx.lineTo(x, worldViewY2 + currentGridSize);
+			}
+
+			// Draw horizontal lines
+			for (let y = startY; y < endY; y += currentGridSize) {
+				ctx.moveTo(worldViewX1 - currentGridSize, y); // Extend lines slightly beyond viewport
+				ctx.lineTo(worldViewX2 + currentGridSize, y);
+			}
+			ctx.stroke();
+			// globalAlpha will be restored by ctx.restore() in redrawCanvas
+		}
+
+		function getResizeHandleRect(element) {
+			if (!element) return null;
+			const handleDrawSizeWorld = RESIZE_HANDLE_SCREEN_SIZE / scale; // Size of handle in world units
+			return {
+				x: element.x + element.width - handleDrawSizeWorld / 2, // Center handle on corner
+				y: element.y + element.height - handleDrawSizeWorld / 2,
+				width: handleDrawSizeWorld,
+				height: handleDrawSizeWorld
+			};
+		}
+
+		function drawElements() {
+			// Assumes transformations (translate, scale) are already applied
+			elements.forEach(element => {
+				if (element.type === 'image') {
+					ctx.drawImage(element.img, element.x, element.y, element.width, element.height);
+					if (element === selectedElement) {
+						ctx.strokeStyle = 'blue';
+						ctx.lineWidth = 2 / scale; // Make selection border visible regardless of zoom
+						ctx.strokeRect(element.x, element.y, element.width, element.height);
+
+						const handleRect = getResizeHandleRect(element);
+						if (handleRect) {
+							ctx.fillStyle = 'blue';
+							ctx.fillRect(handleRect.x, handleRect.y, handleRect.width, handleRect.height);
+						}
+					}
+				} else if (element.type === 'button') {
+					// Button background
+					ctx.fillStyle = 'lightcoral';
+					ctx.fillRect(element.x, element.y, element.width, element.height);
+					// Button border
+					ctx.strokeStyle = 'darkred';
+					ctx.lineWidth = 1 / scale;
+					ctx.strokeRect(element.x, element.y, element.width, element.height);
+					// Button text
+					if (!(editingContext && editingContext.element === element && editingContext.fieldPath === 'text')) {
+						ctx.fillStyle = 'white';
+						// Ensure fontSize calculation is consistent or passed from determineEditableField if needed for exact match
+						const fontSize = Math.min(element.height * 0.5, element.width * 0.8 / (element.text.length * 0.5 || 1));
+						ctx.font = `${fontSize}px Arial`;
+						ctx.textAlign = 'center';
+						ctx.textBaseline = 'middle';
+						ctx.fillText(element.text, element.x + element.width / 2, element.y + element.height / 2);
+					}
+
+					// Selection and resize handles
+					if (element === selectedElement) {
+						ctx.strokeStyle = 'blue';
+						ctx.lineWidth = 2 / scale;
+						ctx.strokeRect(element.x, element.y, element.width, element.height);
+						// Resize handle (same as image)
+						const handleRect = getResizeHandleRect(element);
+						if (handleRect) {
+							ctx.fillStyle = 'blue';
+							ctx.fillRect(handleRect.x, handleRect.y, handleRect.width, handleRect.height);
+						}
+					}
+				} else if (element.type === 'closedQuestion') {
+					const padding = 10 / scale; // Padding in world units
+					const questionAreaHeightRatio = 0.3; // 30% for question, 70% for options
+					const questionDisplayHeight = element.height * questionAreaHeightRatio;
+					const optionsAreaHeight = element.height * (1 - questionAreaHeightRatio);
+					const numOptions = element.options.length;
+					const individualOptionHeight = numOptions > 0 ? (optionsAreaHeight - padding * (numOptions + 1)) / numOptions : 0;
+					const radioRadius = Math.max(2 / scale, Math.min(8 / scale, individualOptionHeight * 0.2));
+
+					// Question Box
+					ctx.fillStyle = '#e0f7fa'; // Light cyan
+					ctx.fillRect(element.x, element.y, element.width, questionDisplayHeight);
+					ctx.strokeStyle = '#00796b'; // Dark teal
+					ctx.lineWidth = 1 / scale;
+					ctx.strokeRect(element.x, element.y, element.width, questionDisplayHeight);
+
+					// Question Text
+					if (!(editingContext && editingContext.element === element && editingContext.fieldPath === 'questionText')) {
+						ctx.fillStyle = '#004d40'; // Darker teal for text
+						const qFontSize = Math.max(5 / scale, Math.min(questionDisplayHeight * 0.6, (element.width - 2 * padding) * 0.9 / (element.questionText.length * 0.5 || 1)));
+						ctx.font = `${qFontSize}px Arial`;
+						ctx.textAlign = 'center';
+						ctx.textBaseline = 'middle';
+						ctx.fillText(element.questionText, element.x + element.width / 2, element.y + questionDisplayHeight / 2);
+					}
+
+					// Draw Options
+					if (numOptions > 0 && individualOptionHeight > radioRadius * 2) { // Only draw if options fit
+						let currentOptionY = element.y + questionDisplayHeight + padding;
+						const optTextFontSize = Math.max(4 / scale, Math.min(individualOptionHeight * 0.5, (element.width - 4 * padding - 2 * radioRadius) * 0.8 / 15)); // Assume avg 15 chars
+						ctx.font = `${optTextFontSize}px Arial`;
+						ctx.textAlign = 'left';
+						ctx.textBaseline = 'middle';
+
+						element.options.forEach((option, index) => {
+							// Option Background (optional, can remove if too cluttered)
+							// ctx.fillStyle = '#fffde7'; // Very light yellow
+							// ctx.fillRect(element.x + padding, currentOptionY, element.width - 2 * padding, individualOptionHeight);
+
+							// Radio Button Visual
+							const radioX = element.x + padding + radioRadius;
+							const radioY = currentOptionY + individualOptionHeight / 2;
+							ctx.beginPath();
+							ctx.arc(radioX, radioY, radioRadius, 0, 2 * Math.PI, false);
+							ctx.fillStyle = 'white'; // Radio button fill
+							ctx.fill();
+							ctx.strokeStyle = '#757575'; // Radio button border
+							ctx.lineWidth = 1 / scale;
+							ctx.stroke();
+
+							// If option.selected is true, draw inner dot (for future interaction)
+							// if (option.selected) {
+							// 	ctx.beginPath();
+							// 	ctx.arc(radioX, radioY, radioRadius * 0.5, 0, 2 * Math.PI, false);
+							// 	ctx.fillStyle = '#757575'; // Inner dot color
+							// 	ctx.fill();
+							// }
+
+							// Option Text
+							if (!(editingContext && editingContext.element === element && editingContext.fieldPath === `options.${index}.text`)) {
+								ctx.fillStyle = '#424242'; // Dark grey for option text
+								ctx.fillText(option.text, radioX + radioRadius + padding / 2, radioY);
+							}
+
+							currentOptionY += individualOptionHeight + padding;
+						});
+					}
+
+					if (element === selectedElement) {
+						ctx.strokeStyle = 'blue';
+						ctx.lineWidth = 2 / scale;
+						ctx.strokeRect(element.x, element.y, element.width, element.height); // Select the whole element
+						// Resize handle (same as image/button)
+						const handleRect = getResizeHandleRect(element);
+						if (handleRect) {
+							ctx.fillStyle = 'blue';
+							ctx.fillRect(handleRect.x, handleRect.y, handleRect.width, handleRect.height);
+						}
+					}
+				} else if (element.type === 'matchPairs') {
+					const padding = 10 / scale;
+					const titleHeightRatio = 0.15; // 15% for title
+					const titleDisplayHeight = element.height * titleHeightRatio;
+					const itemsAreaHeight = element.height * (1 - titleHeightRatio);
+					const columnWidth = (element.width - 3 * padding) / 2; // Width for each column of items
+
+					// Element Background (optional)
+					// ctx.fillStyle = '#f3e5f5'; // Light purple
+					// ctx.fillRect(element.x, element.y, element.width, element.height);
+
+					// Title Box
+					ctx.fillStyle = '#ede7f6'; // Lighter purple for title bg
+					ctx.fillRect(element.x, element.y, element.width, titleDisplayHeight);
+					ctx.strokeStyle = '#5e35b1'; // Deep purple for border
+					ctx.lineWidth = 1 / scale;
+					ctx.strokeRect(element.x, element.y, element.width, titleDisplayHeight);
+
+					// Title Text
+					if (!(editingContext && editingContext.element === element && editingContext.fieldPath === 'title')) {
+						ctx.fillStyle = '#311b92'; // Darker purple for text
+						const titleFontSize = Math.max(5 / scale, Math.min(titleDisplayHeight * 0.6, (element.width - 2 * padding) * 0.9 / (element.title.length * 0.5 || 1)));
+						ctx.font = `${titleFontSize}px Arial`;
+						ctx.textAlign = 'center';
+						ctx.textBaseline = 'middle';
+						ctx.fillText(element.title, element.x + element.width / 2, element.y + titleDisplayHeight / 2);
+					}
+
+					// Function to draw items in a column
+					const drawItemsColumn = (items, startX) => {
+						const numItems = items.length;
+						if (numItems === 0) return;
+						const individualItemHeight = (itemsAreaHeight - (numItems + 1) * padding) / numItems;
+
+						if (individualItemHeight <= padding / 2) return; // Don't draw if items are too small
+
+						let currentItemY = element.y + titleDisplayHeight + padding;
+						const itemTextFontSize = Math.max(4 / scale, Math.min(individualItemHeight * 0.5, (columnWidth - 2 * padding) * 0.8 / 10)); // Assume avg 10 chars
+
+						items.forEach((item, index) => {
+							// Item Box
+							ctx.fillStyle = '#fff'; // White background for items
+							ctx.fillRect(startX, currentItemY, columnWidth, individualItemHeight);
+							ctx.strokeStyle = '#b0bec5'; // Blue-grey border for items
+							ctx.lineWidth = 0.5 / scale;
+							ctx.strokeRect(startX, currentItemY, columnWidth, individualItemHeight);
+
+							// Item Text
+							// Determine if this specific item is being edited
+							const itemSide = items === element.leftItems ? 'leftItems' : 'rightItems';
+							if (!(editingContext && editingContext.element === element && editingContext.fieldPath === `${itemSide}.${index}.text`)) {
+								ctx.fillStyle = '#37474f'; // Dark blue-grey text
+								ctx.font = `${itemTextFontSize}px Arial`;
+								ctx.textAlign = 'center';
+								ctx.textBaseline = 'middle';
+								ctx.fillText(item.text, startX + columnWidth / 2, currentItemY + individualItemHeight / 2);
+							}
+
+							currentItemY += individualItemHeight + padding;
+						});
+					};
+
+					// Draw Left Items
+					drawItemsColumn(element.leftItems, element.x + padding, 'leftItems');
+
+					// Draw Right Items
+					drawItemsColumn(element.rightItems, element.x + padding + columnWidth + padding, 'rightItems');
+
+					// Draw connections (Future enhancement)
+					// element.connections.forEach(conn => { ... });
+
+					if (element === selectedElement) {
+						ctx.strokeStyle = 'blue';
+						ctx.lineWidth = 2 / scale;
+						ctx.strokeRect(element.x, element.y, element.width, element.height);
+						// Resize handle
+						const handleRect = getResizeHandleRect(element);
+						if (handleRect) {
+							ctx.fillStyle = 'blue';
+							ctx.fillRect(handleRect.x, handleRect.y, handleRect.width, handleRect.height);
+						}
+					}
+				} else if (element.type === 'voiceRecording') {
+					const padding = 10 / scale;
+					// All space is for buttons now
+					const availableWidthForButtons = element.width - 4 * padding; // 2 paddings on sides, 2 between buttons
+					const buttonDiameter = Math.min(element.height - 2 * padding, availableWidthForButtons / 3);
+					const buttonRadius = buttonDiameter / 2;
+
+					// Element Background
+					ctx.fillStyle = '#e8f5e9'; // Light green
+					ctx.fillRect(element.x, element.y, element.width, element.height);
+					ctx.strokeStyle = '#388e3c'; // Medium green border
+					ctx.lineWidth = 1 / scale;
+					ctx.strokeRect(element.x, element.y, element.width, element.height);
+
+					// Draw Buttons if they fit
+					if (buttonRadius > padding / scale) { // Ensure buttons are reasonably sized
+						const icons = [element.playIcon, element.recordIcon, element.listenIcon];
+						const buttonColors = ['#66bb6a', '#4caf50', '#81c784']; // Shades of green
+						const buttonCenterY = element.y + element.height / 2;
+						let currentButtonCenterX = element.x + padding + buttonRadius;
+
+						icons.forEach((icon, index) => {
+							// Round Button Background
+							ctx.beginPath();
+							ctx.arc(currentButtonCenterX, buttonCenterY, buttonRadius, 0, 2 * Math.PI, false);
+							ctx.fillStyle = buttonColors[index % buttonColors.length];
+							ctx.fill();
+							ctx.strokeStyle = '#2e7d32'; // Darker green border for buttons
+							ctx.lineWidth = 0.5 / scale;
+							ctx.stroke();
+
+							// Icon Text
+							ctx.fillStyle = 'white';
+							// Adjust font size to fit icon within the circle
+							const btnTextFontSize = Math.max(8 / scale, buttonRadius * 1.2); // Icon size relative to radius
+							ctx.font = `${btnTextFontSize}px Arial`;
+							ctx.textAlign = 'center';
+							ctx.textBaseline = 'middle';
+							ctx.fillText(icon, currentButtonCenterX, buttonCenterY);
+
+							currentButtonCenterX += buttonDiameter + padding; // Move to next button position
+						});
+					}
+
+
+					if (element === selectedElement) {
+						ctx.strokeStyle = 'blue';
+						ctx.lineWidth = 2 / scale;
+						ctx.strokeRect(element.x, element.y, element.width, element.height);
+						// Resize handle
+						const handleRect = getResizeHandleRect(element);
+						if (handleRect) {
+							ctx.fillStyle = 'blue';
+							ctx.fillRect(handleRect.x, handleRect.y, handleRect.width, handleRect.height);
+						}
+					}
+				}
+			});
+		}
+
+		function redrawCanvas() {
+			ctx.clearRect(0, 0, canvas.width, canvas.height);
+			ctx.save();
+			ctx.translate(offsetX, offsetY);
+			ctx.scale(scale, scale);
+
+			drawGridLines();
+			ctx.globalAlpha = 1.0; // Ensure elements are drawn with full opacity
+			drawElements();
+
+			ctx.restore();
+		}
+
+		function updateCursor(worldMouseX, worldMouseY) {
+			let newCursor = 'grab'; // Default
+
+			if (selectedElement) {
+				const handleRect = getResizeHandleRect(selectedElement);
+				if (handleRect &&
+					worldMouseX >= handleRect.x && worldMouseX <= handleRect.x + handleRect.width &&
+					worldMouseY >= handleRect.y && worldMouseY <= handleRect.y + handleRect.height) {
+					newCursor = 'nwse-resize'; // Or 'se-resize'
+				} else if (isPointInElement(worldMouseX, worldMouseY, selectedElement)) {
+					newCursor = 'move';
+				}
+			}
+
+			if (newCursor === 'grab') { // If not on selected element's handle or body
+				for (let i = elements.length - 1; i >= 0; i--) {
+					const el = elements[i];
+					if (el === selectedElement) continue; // Already checked
+
+					if (isPointInElement(worldMouseX, worldMouseY, el)) {
+						newCursor = 'move';
+						break;
+					}
+				}
+			}
+			canvas.style.cursor = newCursor;
+		}
+
+		// --- Text Editing Functions ---
+
+		function getProperty(obj, pathString) {
+			const parts = pathString.split('.');
+			let current = obj;
+			for (let i = 0; i < parts.length; i++) {
+				const key = parts[i];
+				if (i === parts.length - 1) {
+					return current ? current[key] : undefined;
+				}
+				if (current && typeof current === 'object' && key in current) {
+					current = current[key];
+				} else {
+					return undefined; // Path not found
+				}
+			}
+			return undefined;
+		}
+
+		function setProperty(obj, pathString, value) {
+			const parts = pathString.split('.');
+			let current = obj;
+			for (let i = 0; i < parts.length - 1; i++) {
+				const key = parts[i];
+				if (!current[key] || typeof current[key] !== 'object') {
+					// This simplified version assumes the path structure (like arrays) already exists.
+					// For a robust solution, you'd check if current[key] should be an array or object.
+					current[key] = {};
+				}
+				current = current[key];
+			}
+			if (current && typeof current === 'object') {
+				current[parts[parts.length - 1]] = value;
+				return true;
+			}
+			return false;
+		}
+
+		function determineEditableField(element, worldMouseX, worldMouseY) {
+			const padding = 10 / scale; // Common padding, adjust as needed per element type
+			if (element.type === 'button') {
+				if (isPointInElement(worldMouseX, worldMouseY, element)) {
+					const fontSize = Math.min(element.height * 0.5, element.width * 0.8 / (element.text.length * 0.5 || 1));
+					return {
+						path: 'text',
+						worldRect: { x: element.x, y: element.y, width: element.width, height: element.height },
+						currentText: element.text,
+						font: `${fontSize}px Arial`,
+						textAlign: 'center'
+					};
+				}
+			} else if (element.type === 'closedQuestion') {
+				const questionAreaHeightRatio = 0.3;
+				const questionDisplayHeight = element.height * questionAreaHeightRatio;
+				const qRect = { x: element.x, y: element.y, width: element.width, height: questionDisplayHeight };
+
+				if (worldMouseX >= qRect.x && worldMouseX <= qRect.x + qRect.width &&
+					worldMouseY >= qRect.y && worldMouseY <= qRect.y + qRect.height) {
+					const qFontSize = Math.max(5 / scale, Math.min(questionDisplayHeight * 0.6, (element.width - 2 * padding) * 0.9 / (element.questionText.length * 0.5 || 1)));
+					return {
+						path: 'questionText',
+						worldRect: qRect,
+						currentText: element.questionText,
+						font: `${qFontSize}px Arial`,
+						textAlign: 'center'
+					};
+				}
+				// Check options (simplified hit-testing for brevity, refine as needed)
+				const optionsAreaHeight = element.height * (1 - questionAreaHeightRatio);
+				const numOptions = element.options.length;
+				const individualOptionHeight = numOptions > 0 ? (optionsAreaHeight - padding * (numOptions + 1)) / numOptions : 0;
+				const radioRadius = Math.max(2 / scale, Math.min(8 / scale, individualOptionHeight * 0.2));
+				let currentOptionY = element.y + questionDisplayHeight + padding;
+
+				for (let i = 0; i < numOptions; i++) {
+					const option = element.options[i];
+					const textStartX = element.x + padding + radioRadius + radioRadius + padding / 2;
+					const optionTextRect = { x: textStartX, y: currentOptionY, width: element.width - (textStartX - element.x) - padding, height: individualOptionHeight };
+					if (worldMouseX >= optionTextRect.x && worldMouseX <= optionTextRect.x + optionTextRect.width &&
+						worldMouseY >= optionTextRect.y && worldMouseY <= optionTextRect.y + optionTextRect.height && individualOptionHeight > radioRadius * 2) {
+						const optTextFontSize = Math.max(4 / scale, Math.min(individualOptionHeight * 0.5, (optionTextRect.width) * 0.8 / (option.text.length * 0.5 || 1)));
+						return {
+							path: `options.${i}.text`, worldRect: optionTextRect, currentText: option.text,
+							font: `${optTextFontSize}px Arial`, textAlign: 'left'
+						};
+					}
+					currentOptionY += individualOptionHeight + padding;
+				}
+
+			} else if (element.type === 'matchPairs') {
+				const titleHeightRatio = 0.15;
+				const titleDisplayHeight = element.height * titleHeightRatio;
+				const titleRect = { x: element.x, y: element.y, width: element.width, height: titleDisplayHeight };
+				if (worldMouseX >= titleRect.x && worldMouseX <= titleRect.x + titleRect.width &&
+					worldMouseY >= titleRect.y && worldMouseY <= titleRect.y + titleRect.height) {
+					const titleFontSize = Math.max(5 / scale, Math.min(titleDisplayHeight * 0.6, (element.width - 2 * padding) * 0.9 / (element.title.length * 0.5 || 1)));
+					return {
+						path: 'title', worldRect: titleRect, currentText: element.title,
+						font: `${titleFontSize}px Arial`, textAlign: 'center'
+					};
+				}
+				// Check items (simplified hit-testing)
+				const itemsAreaHeight = element.height * (1 - titleHeightRatio);
+				const columnWidth = (element.width - 3 * padding) / 2;
+				const checkItemsColumn = (items, startX, itemSide) => {
+					if (!items) return null;
+					const numItems = items.length;
+					if (numItems === 0) return null;
+					const individualItemHeight = (itemsAreaHeight - (numItems + 1) * padding) / numItems;
+					if (individualItemHeight <= padding / 2) return null;
+					let currentItemY = element.y + titleDisplayHeight + padding;
+					for (let i = 0; i < numItems; i++) {
+						const item = items[i];
+						const itemRect = { x: startX, y: currentItemY, width: columnWidth, height: individualItemHeight };
+						if (worldMouseX >= itemRect.x && worldMouseX <= itemRect.x + itemRect.width &&
+							worldMouseY >= itemRect.y && worldMouseY <= itemRect.y + itemRect.height) {
+							const itemTextFontSize = Math.max(4 / scale, Math.min(individualItemHeight * 0.5, (columnWidth - 2 * padding) * 0.8 / (item.text.length * 0.5 || 1)));
+							return {
+								path: `${itemSide}.${i}.text`, worldRect: itemRect, currentText: item.text,
+								font: `${itemTextFontSize}px Arial`, textAlign: 'center'
+							};
+						}
+						currentItemY += individualItemHeight + padding;
+					}
+					return null;
+				};
+				let field = checkItemsColumn(element.leftItems, element.x + padding, 'leftItems');
+				if (field) return field;
+				field = checkItemsColumn(element.rightItems, element.x + padding + columnWidth + padding, 'rightItems');
+				// No editable text fields for voiceRecording in this version
+				if (field) return field;
+			}
+			return null;
+		}
+
+		function initiateEditing(element, fieldInfo) {
+			cleanupActiveInput(); // Ensure no previous input is active
+			editingContext = { element, fieldPath: fieldInfo.path, worldRect: fieldInfo.worldRect, font: fieldInfo.font, textAlign: fieldInfo.textAlign, originalText: fieldInfo.currentText };
+
+			const input = document.createElement('textarea'); // Use textarea for multi-line potential
+			input.value = fieldInfo.currentText;
+			input.style.position = 'absolute';
+			const screenX = fieldInfo.worldRect.x * scale + offsetX;
+			const screenY = fieldInfo.worldRect.y * scale + offsetY;
+			const screenWidth = fieldInfo.worldRect.width * scale;
+			const screenHeight = fieldInfo.worldRect.height * scale;
+			input.style.left = `${screenX}px`;
+			input.style.top = `${screenY}px`;
+			input.style.width = `${screenWidth}px`;
+			input.style.height = `${screenHeight}px`;
+			input.style.zIndex = '100';
+			input.style.font = fieldInfo.font || '12px Arial';
+			input.style.textAlign = fieldInfo.textAlign || 'left';
+			input.style.border = '1px solid blue';
+			input.style.padding = '2px'; // Small padding
+			input.style.margin = '0';
+			input.style.resize = 'none';
+			input.style.overflowY = 'auto'; // Allow scroll if text overflows
+			input.style.boxSizing = 'border-box';
+
+			input.addEventListener('blur', applyTextEdit);
+			input.addEventListener('keydown', (e) => {
+				if (e.key === 'Enter' && !e.shiftKey) { // Enter to save (Shift+Enter for newline in textarea)
+					e.preventDefault(); // Prevent newline if not Shift
+					applyTextEdit();
+				} else if (e.key === 'Escape') {
+					cancelTextEdit();
+				}
+			});
+
+			document.body.appendChild(input);
+			input.focus();
+			input.select();
+			activeInputElement = input;
+			redrawCanvas(); // To hide canvas text
+		}
+
+		function applyTextEdit() {
+			if (!activeInputElement || !editingContext) return;
+			const newValue = activeInputElement.value;
+			setProperty(editingContext.element, editingContext.fieldPath, newValue);
+			cleanupActiveInput();
+			redrawCanvas();
+		}
+
+		function cancelTextEdit() {
+			if (!activeInputElement || !editingContext) return;
+			// Optionally revert to originalText if needed, but for now, just cleanup
+			// setProperty(editingContext.element, editingContext.fieldPath, editingContext.originalText);
+			cleanupActiveInput();
+			redrawCanvas();
+		}
+
+		function cleanupActiveInput() {
+			if (activeInputElement) {
+				activeInputElement.removeEventListener('blur', applyTextEdit);
+				// Keydown listener is on the element itself, no need to remove if element is removed
+				activeInputElement.remove();
+			}
+			activeInputElement = null;
+			editingContext = null;
+		}
+
+		// --- End Text Editing Functions ---
+
+
+		canvas.addEventListener('mousedown', (e) => {
+			if (activeInputElement && e.target === activeInputElement) return; // Click was on the input, let it handle
+			cleanupActiveInput(); // If clicked outside an active input, finalize/cancel it.
+
+			const rect = canvas.getBoundingClientRect();
+			const mouseScreenX = e.clientX - rect.left;
+			const mouseScreenY = e.clientY - rect.top;
+			const { x: worldMouseX, y: worldMouseY } = screenToWorld(mouseScreenX, mouseScreenY);
+
+			// Priority 1: Check for resize handle click if an element is selected
+			if (selectedElement) {
+				const handleRect = getResizeHandleRect(selectedElement);
+				if (handleRect &&
+					worldMouseX >= handleRect.x && worldMouseX <= handleRect.x + handleRect.width &&
+					worldMouseY >= handleRect.y && worldMouseY <= handleRect.y + handleRect.height) {
+					isResizingElement = true;
+					isMovingElement = false;
+					isDragging = false;
+					setTargetGridOpacity(1);
+					canvas.style.cursor = 'nwse-resize';
+					redrawCanvas(); // In case selection changes appearance
+					return;
+				}
+			}
+
+			// Priority 2: Check for element click (select/move)
+			let clickedOnElement = null;
+			for (let i = elements.length - 1; i >= 0; i--) { // Iterate in reverse for top-most
+				const element = elements[i];
+				if (isPointInElement(worldMouseX, worldMouseY, element)) {
+					clickedOnElement = element;
+					break;
+				}
+			}
+
+			if (clickedOnElement) {
+				selectedElement = clickedOnElement;
+				isMovingElement = true;
+				elementDragOffsetX = worldMouseX - selectedElement.x;
+				elementDragOffsetY = worldMouseY - selectedElement.y;
+				isResizingElement = false;
+				isDragging = false;
+				setTargetGridOpacity(1);
+				canvas.style.cursor = 'move';
+			} else {
+				// Priority 3: Pan canvas
+				selectedElement = null; // Deselect if clicked on background
+				isDragging = true;
+				dragStartX = e.clientX - offsetX; // Screen coords for canvas pan
+				dragStartY = e.clientY - offsetY;
+				isMovingElement = false;
+				isResizingElement = false;
+				setTargetGridOpacity(1);
+				canvas.style.cursor = 'grabbing';
+			}
+			redrawCanvas();
+		});
+
+		canvas.addEventListener('mousemove', (e) => {
+			if (activeInputElement) return; // Don't process canvas move/drag if editing text
+			const rect = canvas.getBoundingClientRect();
+			const mouseScreenX = e.clientX - rect.left;
+			const mouseScreenY = e.clientY - rect.top;
+			const { x: worldMouseX, y: worldMouseY } = screenToWorld(mouseScreenX, mouseScreenY);
+
+			if (isResizingElement && selectedElement) {
+				// Move freely during resize, snap on mouseup
+				let newWidth = worldMouseX - selectedElement.x;
+				let newHeight = worldMouseY - selectedElement.y;
+
+				const minSizeWorld = MIN_ELEMENT_SIZE_SCREEN / scale;
+				// selectedElement.x remains the anchor during resize
+				// selectedElement.y remains the anchor during resize
+				selectedElement.width = Math.max(minSizeWorld, newWidth);
+				selectedElement.height = Math.max(minSizeWorld, newHeight);
+				redrawCanvas();
+			} else if (isMovingElement && selectedElement) {
+				// Move freely during drag, snap on mouseup
+				selectedElement.x = worldMouseX - elementDragOffsetX;
+				selectedElement.y = worldMouseY - elementDragOffsetY;
+				redrawCanvas();
+			} else if (isDragging) {
+				offsetX = e.clientX - dragStartX;
+				offsetY = e.clientY - dragStartY;
+				redrawCanvas();
+			} else {
+				// Not actively doing anything, just hovering
+				updateCursor(worldMouseX, worldMouseY);
+			}
+		});
+
+		canvas.addEventListener('mouseup', (e) => {
+			// if (activeInputElement) return; // Usually handled by blur, but good for safety
+			let actionTaken = false;
+
+			if (isMovingElement && selectedElement) {
+				selectedElement.x = snapToGrid(selectedElement.x);
+				selectedElement.y = snapToGrid(selectedElement.y);
+				actionTaken = true;
+			}
+			if (isResizingElement && selectedElement) {
+				selectedElement.x = snapToGrid(selectedElement.x);
+				selectedElement.y = snapToGrid(selectedElement.y);
+
+				const snappedRight = snapToGrid(selectedElement.x + selectedElement.width);
+				const snappedBottom = snapToGrid(selectedElement.y + selectedElement.height);
+
+				let newWidth = snappedRight - selectedElement.x;
+				let newHeight = snappedBottom - selectedElement.y;
+				const minSizeWorld = MIN_ELEMENT_SIZE_SCREEN / scale;
+				selectedElement.width = Math.max(minSizeWorld, newWidth);
+				selectedElement.height = Math.max(minSizeWorld, newHeight);
+				actionTaken = true;
+			}
+
+			let needsCursorUpdate = false;
+			if (isResizingElement) { isResizingElement = false; needsCursorUpdate = true; actionTaken = true; }
+			if (isMovingElement) { isMovingElement = false; needsCursorUpdate = true; actionTaken = true; }
+			if (isDragging) { isDragging = false; needsCursorUpdate = true; actionTaken = true; }
+
+			// Start debounced hide for the grid
+			clearTimeout(gridHideTimer); // Clear any existing timer
+			gridHideTimer = setTimeout(() => {
+				setTargetGridOpacity(0);
+			}, GRID_HIDE_DEBOUNCE_TIME);
+
+			if (needsCursorUpdate) {
+				const rect = canvas.getBoundingClientRect();
+				const mouseScreenX = e.clientX - rect.left;
+				const mouseScreenY = e.clientY - rect.top;
+				const { x: worldMouseX, y: worldMouseY } = screenToWorld(mouseScreenX, mouseScreenY);
+				updateCursor(worldMouseX, worldMouseY);
+			}
+			if (actionTaken) {
+				redrawCanvas(); // Redraw if any snapping or state change occurred
+			}
+		});
+
+		canvas.addEventListener('mouseleave', () => { // Stop dragging if mouse leaves canvas
+			// Note: activeInputElement will lose focus and trigger 'blur' if mouse leaves window.
+			if (isDragging || isMovingElement || isResizingElement) {
+				isDragging = false;
+				// If an operation is abruptly stopped by mouseleave, also start debounced hide
+				clearTimeout(gridHideTimer);
+				gridHideTimer = setTimeout(() => setTargetGridOpacity(0), GRID_HIDE_DEBOUNCE_TIME);
+
+				isMovingElement = false;
+				isResizingElement = false;
+				// Cursor will be updated on next mousemove over canvas, or set to default
+				canvas.style.cursor = 'grab'; // Default if mouse leaves while active
+			}
+		});
+
+		canvas.addEventListener('wheel', (e) => {
+			if (activeInputElement) { e.preventDefault(); return; } // Prevent canvas zoom while editing text
+			e.preventDefault();
+			const rect = canvas.getBoundingClientRect();
+			const mouseScreenX = e.clientX - rect.left;
+			const mouseScreenY = e.clientY - rect.top;
+
+			const { x: worldX_beforeZoom, y: worldY_beforeZoom } = screenToWorld(mouseScreenX, mouseScreenY);
+
+			const delta = e.deltaY > 0 ? -zoomSensitivity : zoomSensitivity;
+			const oldScale = scale;
+			scale = Math.max(minScale, Math.min(maxScale, scale + delta * scale));
+
+			// Adjust offset to zoom towards the mouse pointer
+			offsetX = mouseScreenX - worldX_beforeZoom * scale;
+			offsetY = mouseScreenY - worldY_beforeZoom * scale;
+
+			redrawCanvas();
+		});
+
+		canvas.addEventListener('dblclick', (e) => {
+			if (activeInputElement) return; // Already editing
+
+			const rect = canvas.getBoundingClientRect();
+			const mouseScreenX = e.clientX - rect.left;
+			const mouseScreenY = e.clientY - rect.top;
+			const { x: worldMouseX, y: worldMouseY } = screenToWorld(mouseScreenX, mouseScreenY);
+
+			for (let i = elements.length - 1; i >= 0; i--) { // Iterate top-most first
+				const element = elements[i];
+				const fieldInfo = determineEditableField(element, worldMouseX, worldMouseY);
+				if (fieldInfo) {
+					initiateEditing(element, fieldInfo);
+					break;
+				}
+			}
+		});
+
+		const imageUpload = document.getElementById('imageUpload');
+		imageUpload.addEventListener('change', function (e) {
+			const file = e.target.files[0];
+			if (file) {
+				const reader = new FileReader();
+				reader.onload = function (event) {
+					const img = new Image();
+					img.onload = function () {
+						const { x: viewCenterXWorld, y: viewCenterYWorld } = screenToWorld(canvas.width / 2, canvas.height / 2);
+
+						elements.push({
+							type: 'image',
+							img: img,
+							x: viewCenterXWorld - (img.naturalWidth / 2) * (MIN_ELEMENT_SIZE_SCREEN / img.naturalWidth) / scale, // Initial size logic can be improved
+							y: viewCenterYWorld - (img.naturalHeight / 2) * (MIN_ELEMENT_SIZE_SCREEN / img.naturalWidth) / scale,
+							width: img.naturalWidth * (MIN_ELEMENT_SIZE_SCREEN / img.naturalWidth) / scale, // Start with a somewhat normalized size
+							height: img.naturalHeight * (MIN_ELEMENT_SIZE_SCREEN / img.naturalWidth) / scale,
+							// Or simply:
+							// x: viewCenterXWorld - img.naturalWidth / 2,
+							// y: viewCenterYWorld - img.naturalHeight / 2,
+							// width: img.naturalWidth,
+							// height: img.naturalHeight
+						});
+						redrawCanvas();
+						setTargetGridOpacity(1); // Show grid
+						clearTimeout(gridHideTimer); // Debounce hide
+						gridHideTimer = setTimeout(() => {
+							setTargetGridOpacity(0);
+						}, GRID_HIDE_DEBOUNCE_TIME);
+					}
+					img.src = event.target.result;
+				}
+				reader.readAsDataURL(file);
+				e.target.value = null;
+			}
+		});
+
+		function addExampleButton() {
+			const { x: viewCenterXWorld, y: viewCenterYWorld } = screenToWorld(canvas.width / 2, canvas.height / 2);
+			const buttonWidth = 150; // world units
+			const buttonHeight = 50; // world units
+
+			elements.push({
+				type: 'button',
+				text: 'Example Btn',
+				x: viewCenterXWorld - buttonWidth / 2,
+				y: viewCenterYWorld - buttonHeight / 2,
+				width: buttonWidth,
+				height: buttonHeight,
+				id: `button-${Date.now()}` // Unique ID for potential future use
+			});
+			redrawCanvas();
+			setTargetGridOpacity(1); // Show grid
+			clearTimeout(gridHideTimer); // Debounce hide
+			gridHideTimer = setTimeout(() => {
+				setTargetGridOpacity(0);
+			}, GRID_HIDE_DEBOUNCE_TIME);
+		}
+
+		function addClosedQuestion() {
+			const { x: viewCenterXWorld, y: viewCenterYWorld } = screenToWorld(canvas.width / 2, canvas.height / 2);
+			const qWidth = 300; // world units
+			const qHeight = 150; // world units
+
+			elements.push({
+				type: 'closedQuestion',
+				questionText: 'Select the correct option:',
+				options: [
+					{ id: 'opt1', text: 'Option Alpha' /*, selected: false */ },
+					{ id: 'opt2', text: 'Option Beta' /*, selected: false */ },
+					{ id: 'opt3', text: 'Option Gamma' /*, selected: false */ },
+					// Add more default options if desired
+				],
+				x: viewCenterXWorld - qWidth / 2,
+				y: viewCenterYWorld - qHeight / 2,
+				width: qWidth,
+				height: qHeight,
+				id: `closedQ-${Date.now()}`
+			});
+			redrawCanvas();
+			setTargetGridOpacity(1); // Show grid
+			clearTimeout(gridHideTimer); // Debounce hide
+			gridHideTimer = setTimeout(() => {
+				setTargetGridOpacity(0);
+			}, GRID_HIDE_DEBOUNCE_TIME);
+		}
+
+		function addMatchPairs() {
+			const { x: viewCenterXWorld, y: viewCenterYWorld } = screenToWorld(canvas.width / 2, canvas.height / 2);
+			const mpWidth = 400; // world units
+			const mpHeight = 250; // world units
+
+			elements.push({
+				type: 'matchPairs',
+				title: 'Match the Pairs:',
+				leftItems: [
+					{ id: `l-${Date.now()}-1`, text: 'Apple' },
+					{ id: `l-${Date.now()}-2`, text: 'Dog' },
+					{ id: `l-${Date.now()}-3`, text: 'Car' }
+				],
+				rightItems: [
+					{ id: `r-${Date.now()}-1`, text: 'Fruit' },
+					{ id: `r-${Date.now()}-2`, text: 'Animal' },
+					{ id: `r-${Date.now()}-3`, text: 'Vehicle' }
+				],
+				connections: [], // For future use to store { leftId, rightId }
+				x: viewCenterXWorld - mpWidth / 2,
+				y: viewCenterYWorld - mpHeight / 2,
+				width: mpWidth,
+				height: mpHeight,
+				id: `matchPairs-${Date.now()}`
+			});
+			redrawCanvas();
+			setTargetGridOpacity(1); // Show grid
+			clearTimeout(gridHideTimer); // Debounce hide
+			gridHideTimer = setTimeout(() => {
+				setTargetGridOpacity(0);
+			}, GRID_HIDE_DEBOUNCE_TIME);
+		}
+
+		function addVoiceRecording() {
+			const { x: viewCenterXWorld, y: viewCenterYWorld } = screenToWorld(canvas.width / 2, canvas.height / 2);
+			const vrWidth = 180; // Adjusted for 3 round buttons in a row
+			const vrHeight = 60;  // Adjusted for a single row of buttons
+
+			elements.push({
+				type: 'voiceRecording',
+				playIcon: '▶️', // Play command icon
+				recordIcon: '🎤', // Record with microphone icon
+				listenIcon: '🎧', // Listen to recording icon
+				x: viewCenterXWorld - vrWidth / 2,
+				y: viewCenterYWorld - vrHeight / 2,
+				width: vrWidth,
+				height: vrHeight,
+				id: `voiceRec-${Date.now()}`
+				// Future: commandAudioSrc: null, userRecordingBlob: null, isRecording: false
+			});
+			redrawCanvas();
+			setTargetGridOpacity(1); // Show grid
+			clearTimeout(gridHideTimer); // Debounce hide
+			gridHideTimer = setTimeout(() => {
+				setTargetGridOpacity(0);
+			}, GRID_HIDE_DEBOUNCE_TIME);
+		}
+
+
+
+		const addExampleButtonBtn = document.getElementById('addExampleButtonBtn');
+		addExampleButtonBtn.addEventListener('click', addExampleButton);
+
+		const addClosedQuestionBtn = document.getElementById('addClosedQuestionBtn');
+		addClosedQuestionBtn.addEventListener('click', addClosedQuestion);
+
+		const addMatchPairsBtn = document.getElementById('addMatchPairsBtn');
+		addMatchPairsBtn.addEventListener('click', addMatchPairs);
+
+		const addVoiceRecordingBtn = document.getElementById('addVoiceRecordingBtn');
+		addVoiceRecordingBtn.addEventListener('click', addVoiceRecording);
+
+		// Initial setup
+		window.addEventListener('resize', resizeCanvas);
+		resizeCanvas(); // This will call redrawCanvas
+		setTargetGridOpacity(0, true); // Ensure grid is initially hidden without animation
+		updateCursor(0, 0); // Set initial cursor based on no elements
+	</script>
+</body>
+
+</html>
