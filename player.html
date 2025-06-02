@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Exercise Player</title>
+	<style>
+		body {
+			margin: 0;
+			overflow: hidden;
+			background-color: #e0e0e0;
+			font-family: Arial, sans-serif;
+		}
+
+		canvas {
+			display: block;
+		}
+
+		#controls {
+			position: absolute;
+			top: 10px;
+			left: 10px;
+			background-color: rgba(255, 255, 255, 0.8);
+			padding: 10px;
+			border-radius: 5px;
+			z-index: 10;
+		}
+
+		#player-content-area {
+			width: 100vw;
+			height: 100vh;
+			position: relative;
+			/* For absolute positioning of children */
+			overflow: hidden;
+			/* Or auto/scroll if you want scrollbars for oversized content */
+			background-color: #f4f4f4;
+			/* A slightly different background for the content area */
+		}
+
+		.player-element {
+			/* Base style for all elements */
+			position: absolute;
+			box-sizing: border-box;
+			border: 1px solid transparent;
+			/* Base border, can be overridden */
+			overflow: hidden;
+			/* Prevent content spillover */
+		}
+
+		.player-element img,
+		.player-element button {
+			width: 100%;
+			height: 100%;
+			display: block;
+		}
+
+		.player-button-element button {
+			background-color: lightcoral;
+			color: white;
+			border: 1px solid darkred;
+			cursor: pointer;
+			font-size: inherit;
+			/* Will be set dynamically */
+		}
+
+		.player-closed-question-element {
+			background-color: #e0f7fa;
+			border: 1px solid #00796b;
+			display: flex;
+			flex-direction: column;
+			padding: 5px;
+			/* Adjust as needed */
+		}
+
+		.cq-question-text {
+			text-align: center;
+			margin-bottom: 5px;
+			color: #004d40;
+			flex-shrink: 0;
+		}
+
+		.cq-options-container {
+			flex-grow: 1;
+			overflow-y: auto;
+		}
+
+		.cq-option {
+			display: flex;
+			align-items: center;
+			margin-bottom: 3px;
+			background-color: white;
+			padding: 2px 5px;
+			border-radius: 3px;
+			border: 1px solid #757575;
+		}
+
+		.cq-option-radio {
+			width: 1em;
+			/* Relative to font size */
+			height: 1em;
+			border: 1px solid #757575;
+			border-radius: 50%;
+			margin-right: 5px;
+			background-color: white;
+		}
+
+		.cq-option-text {
+			color: #424242;
+		}
+
+		.player-match-pairs-element {
+			background-color: #ede7f6;
+			border: 1px solid #5e35b1;
+			display: flex;
+			flex-direction: column;
+			padding: 5px;
+		}
+
+		.mp-title-text {
+			text-align: center;
+			margin-bottom: 5px;
+			color: #311b92;
+			flex-shrink: 0;
+		}
+
+		.mp-columns-container {
+			display: flex;
+			flex-grow: 1;
+			justify-content: space-around;
+		}
+
+		.mp-column {
+			display: flex;
+			flex-direction: column;
+			width: 45%;
+			/* Adjust as needed */
+		}
+
+		.mp-item {
+			background-color: white;
+			border: 1px solid #b0bec5;
+			text-align: center;
+			margin-bottom: 3px;
+			padding: 2px;
+			border-radius: 3px;
+			color: #37474f;
+			flex-grow: 1;
+			/* Distribute space if items are few */
+			display: flex;
+			align-items: center;
+			justify-content: center;
+		}
+
+		.player-voice-recording-element {
+			background-color: #e8f5e9;
+			border: 1px solid #388e3c;
+			display: flex;
+			justify-content: space-around;
+			align-items: center;
+			padding: 5px;
+		}
+
+		.vr-button {
+			width: 30%;
+			/* Adjust as needed */
+			height: 80%;
+			/* Adjust as needed */
+			border-radius: 50%;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			color: white;
+			cursor: pointer;
+			border: 1px solid #2e7d32;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="controls">
+		<label for="importFile">Import Exercise (JSON):</label>
+		<input type="file" id="importFile" accept=".json">
+	</div>
+	<div id="player-content-area"></div>
+
+	<script>
+		const importFile = document.getElementById('importFile');
+		const playerContentArea = document.getElementById('player-content-area');
+
+		let elements = []; // To store all elements from the imported JSON
+		let loadedImages = {}; // To cache loaded image objects
+
+		function renderContentDOM() {
+			playerContentArea.innerHTML = ''; // Clear previous content
+
+			if (elements.length === 0) {
+				return;
+			}
+
+			// 1. Calculate bounding box of all elements
+			let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+			elements.forEach(el => {
+				minX = Math.min(minX, el.x);
+				minY = Math.min(minY, el.y);
+				maxX = Math.max(maxX, el.x + el.width);
+				maxY = Math.max(maxY, el.y + el.height);
+			});
+
+			const totalContentWidth = maxX - minX;
+			const totalContentHeight = maxY - minY;
+
+			// 2. Get viewport dimensions
+			const viewportWidth = playerContentArea.clientWidth;
+			const viewportHeight = playerContentArea.clientHeight;
+
+			// 3. Calculate scale factor to fit content
+			let contentScale = 1;
+			if (totalContentWidth > 0 && totalContentHeight > 0) {
+				contentScale = Math.min(viewportWidth / totalContentWidth, viewportHeight / totalContentHeight);
+			}
+			// Optional: Add a little padding/margin around the content
+			contentScale *= 0.95;
+
+
+			// 4. Calculate offsets to center the scaled content
+			const scaledContentWidth = totalContentWidth * contentScale;
+			const scaledContentHeight = totalContentHeight * contentScale;
+
+			const offsetX = (viewportWidth - scaledContentWidth) / 2;
+			const offsetY = (viewportHeight - scaledContentHeight) / 2;
+
+			elements.forEach(element => {
+				const elWrapper = document.createElement('div');
+				elWrapper.classList.add('player-element');
+				elWrapper.style.left = `${(element.x - minX) * contentScale + offsetX}px`;
+				elWrapper.style.top = `${(element.y - minY) * contentScale + offsetY}px`;
+				elWrapper.style.width = `${element.width * contentScale}px`;
+				elWrapper.style.height = `${element.height * contentScale}px`;
+				// Base font size, can be adjusted per element type
+				const baseFontSize = Math.max(8, element.height * contentScale * 0.1); // Example base font size
+				elWrapper.style.fontSize = `${baseFontSize}px`;
+
+				if (element.type === 'image') {
+					elWrapper.classList.add('player-image-element');
+					const img = document.createElement('img');
+					if (loadedImages[element.src]) {
+						img.src = loadedImages[element.src].src;
+					} else {
+						img.alt = 'Loading image...'; // Placeholder
+						elWrapper.textContent = 'Loading...'; // Fallback text
+					}
+					elWrapper.appendChild(img);
+				} else if (element.type === 'button') {
+					elWrapper.classList.add('player-button-element');
+					const btn = document.createElement('button');
+					btn.textContent = element.text;
+					// Dynamic font size for button text
+					const btnFontSize = Math.min(element.height * contentScale * 0.4, element.width * contentScale * 0.8 / (element.text.length * 0.6 || 1));
+					btn.style.fontSize = `${Math.max(8, btnFontSize)}px`;
+					elWrapper.appendChild(btn);
+				} else if (element.type === 'closedQuestion') {
+					elWrapper.classList.add('player-closed-question-element');
+					const qTextDiv = document.createElement('div');
+					qTextDiv.classList.add('cq-question-text');
+					qTextDiv.textContent = element.questionText;
+					const qFontSize = Math.min(element.height * contentScale * 0.15, element.width * contentScale * 0.8 / (element.questionText.length * 0.6 || 1));
+					qTextDiv.style.fontSize = `${Math.max(8, qFontSize)}px`;
+					elWrapper.appendChild(qTextDiv);
+
+					const optionsContainer = document.createElement('div');
+					optionsContainer.classList.add('cq-options-container');
+					if (element.options && element.options.length > 0) {
+						element.options.forEach(option => {
+							const optionDiv = document.createElement('div');
+							optionDiv.classList.add('cq-option');
+							const radioDiv = document.createElement('div');
+							radioDiv.classList.add('cq-option-radio');
+							const optionTextDiv = document.createElement('div');
+							optionTextDiv.classList.add('cq-option-text');
+							optionTextDiv.textContent = option.text;
+							// Font size for options can be relative to the main element font size or calculated
+							optionTextDiv.style.fontSize = `0.9em`; // Example
+
+							optionDiv.appendChild(radioDiv);
+							optionDiv.appendChild(optionTextDiv);
+							optionsContainer.appendChild(optionDiv);
+						});
+					}
+					elWrapper.appendChild(optionsContainer);
+				} else if (element.type === 'matchPairs') {
+					elWrapper.classList.add('player-match-pairs-element');
+					const titleDiv = document.createElement('div');
+					titleDiv.classList.add('mp-title-text');
+					titleDiv.textContent = element.title;
+					const mpTitleFontSize = Math.min(element.height * contentScale * 0.1, element.width * contentScale * 0.8 / (element.title.length * 0.6 || 1));
+					titleDiv.style.fontSize = `${Math.max(8, mpTitleFontSize)}px`;
+					elWrapper.appendChild(titleDiv);
+
+					const columnsContainer = document.createElement('div');
+					columnsContainer.classList.add('mp-columns-container');
+
+					['leftItems', 'rightItems'].forEach(itemSide => {
+						const columnDiv = document.createElement('div');
+						columnDiv.classList.add('mp-column');
+						if (element[itemSide] && element[itemSide].length > 0) {
+							element[itemSide].forEach(item => {
+								const itemDiv = document.createElement('div');
+								itemDiv.classList.add('mp-item');
+								itemDiv.textContent = item.text;
+								// Font size for items can be relative or calculated
+								itemDiv.style.fontSize = `0.8em`; // Example
+								columnDiv.appendChild(itemDiv);
+							});
+						}
+						columnsContainer.appendChild(columnDiv);
+					});
+					elWrapper.appendChild(columnsContainer);
+				} else if (element.type === 'voiceRecording') {
+					elWrapper.classList.add('player-voice-recording-element');
+					const icons = [element.playIcon, element.recordIcon, element.listenIcon];
+					const colors = ['#66bb6a', '#4caf50', '#81c784'];
+					icons.forEach((icon, index) => {
+						const vrButton = document.createElement('div');
+						vrButton.classList.add('vr-button');
+						vrButton.textContent = icon;
+						vrButton.style.backgroundColor = colors[index];
+						const iconFontSize = element.height * contentScale * 0.4; // Example
+						vrButton.style.fontSize = `${Math.max(10, iconFontSize)}px`;
+						elWrapper.appendChild(vrButton);
+					});
+				}
+				playerContentArea.appendChild(elWrapper);
+			});
+		}
+
+		importFile.addEventListener('change', function (e) {
+			const file = e.target.files[0];
+			if (file) {
+				const reader = new FileReader();
+				reader.onload = function (event) {
+					try {
+						const importedData = JSON.parse(event.target.result);
+						elements = importedData;
+						loadedImages = {}; // Clear previous cache
+
+						// Preload images
+						let imagesToLoad = 0;
+						elements.forEach(el => {
+							if (el.type === 'image' && el.src) {
+								imagesToLoad++;
+								const img = new Image();
+								img.onload = () => {
+									loadedImages[el.src] = img;
+									imagesToLoad--;
+									if (imagesToLoad === 0) {
+										renderContentDOM(); // Render once all images are loaded
+									}
+								};
+								img.onerror = () => {
+									console.error("Failed to load image:", el.src);
+									imagesToLoad--;
+									if (imagesToLoad === 0) {
+										renderContentDOM();
+									}
+								};
+								img.src = el.src;
+							}
+						});
+						if (imagesToLoad === 0) { // If no images, redraw immediately
+							renderContentDOM();
+						}
+
+					} catch (error) {
+						console.error("Error parsing JSON file:", error);
+						alert("Failed to load exercise data. Please ensure it's a valid JSON file.");
+					}
+				};
+				reader.readAsText(file);
+				e.target.value = null; // Reset file input
+			}
+		});
+
+		// Initial setup
+		// Call renderContentDOM on window resize to re-calculate framing
+		window.addEventListener('resize', renderContentDOM);
+		renderContentDOM(); // Initial render (will be empty until file is loaded)
+	</script>
+</body>
+
+</html>

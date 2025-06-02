@@ -27,6 +27,7 @@
 		Pairs</button>
 	<button id="addVoiceRecordingBtn" style="position: absolute; top: 10px; left: 470px; z-index: 10;">Add Voice
 		Rec</button>
+	<button id="exportDataBtn" style="position: absolute; top: 10px; left: 610px; z-index: 10;">Export Data</button>
 	<canvas id="gridCanvas"></canvas>
 
 	<script>
@@ -1040,6 +1041,41 @@
 			}, GRID_HIDE_DEBOUNCE_TIME);
 		}
 
+		function exportCanvasData() {
+			const exportableElements = elements.map(el => {
+				const baseElement = {
+					id: el.id,
+					type: el.type,
+					x: el.x,
+					y: el.y,
+					width: el.width,
+					height: el.height,
+				};
+				if (el.type === 'image') {
+					return { ...baseElement, src: el.img.src };
+				} else if (el.type === 'button') {
+					return { ...baseElement, text: el.text };
+				} else if (el.type === 'closedQuestion') {
+					return { ...baseElement, questionText: el.questionText, options: el.options };
+				} else if (el.type === 'matchPairs') {
+					return { ...baseElement, title: el.title, leftItems: el.leftItems, rightItems: el.rightItems };
+				} else if (el.type === 'voiceRecording') {
+					return { ...baseElement, playIcon: el.playIcon, recordIcon: el.recordIcon, listenIcon: el.listenIcon };
+				}
+				return baseElement; // Should not happen if all types are handled
+			});
+
+			const jsonData = JSON.stringify(exportableElements, null, 2); // null, 2 for pretty printing
+			const blob = new Blob([jsonData], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = 'canvas_export.json';
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		}
 
 
 		const addExampleButtonBtn = document.getElementById('addExampleButtonBtn');
@@ -1053,6 +1089,9 @@
 
 		const addVoiceRecordingBtn = document.getElementById('addVoiceRecordingBtn');
 		addVoiceRecordingBtn.addEventListener('click', addVoiceRecording);
+
+		const exportDataBtn = document.getElementById('exportDataBtn');
+		exportDataBtn.addEventListener('click', exportCanvasData);
 
 		// Initial setup
 		window.addEventListener('resize', resizeCanvas);
